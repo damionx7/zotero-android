@@ -6,7 +6,7 @@ plugins {
     kotlin("android")
     kotlin("kapt")
     kotlin("plugin.serialization")
-    id("com.github.triplet.play") version "3.7.0"
+    //id("com.github.triplet.play") version "3.7.0"
     id("dagger.hilt.android.plugin")
     id("realm-android")
     id("kotlin-parcelize")
