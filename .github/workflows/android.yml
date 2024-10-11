@@ -59,12 +59,15 @@ jobs:
         run: ./gradlew androidDependencies --no-configuration-cache
 
       - name: Build Release APK/AAB
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease bundleRelease
 
+      - name: List APK and AAB files
+        run: ls -R app/build/outputs/
+  
       - name: Upload Release APK/AAB as an Artifact
         uses: actions/upload-artifact@v3
         with:
           name: release-artifact
           path: |
-            app/build/outputs/apk/release/*.apk
-            app/build/outputs/bundle/release/*.aab
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/bundle/release/app-release.aab
