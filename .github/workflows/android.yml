@@ -7,9 +7,6 @@ on:
       - '**'  # Push events to every tag including hierarchical tags like v1.0/beta
   workflow_dispatch:  # Allow manual triggering from GitHub Actions UI
 
-env:
-  ANDROID_PUBLISHER_CREDENTIALS: ""
-
 jobs:
   build:
     environment: prod
@@ -59,15 +56,10 @@ jobs:
         run: ./gradlew androidDependencies --no-configuration-cache
 
       - name: Build Release APK/AAB
-        run: ./gradlew assembleRelease bundleRelease
-
-      - name: List APK and AAB files
-        run: ls -R app/build/outputs/
+        run: ./gradlew assembleRelease
   
-      - name: Upload Internal Release APK/AAB as an Artifact
+      - name: Upload Internal Release APK as an Artifact
         uses: actions/upload-artifact@v3
         with:
-          name: internal-release-artifact
-          path: |
-            app/build/outputs/apk/internal/release/app-internal-release.apk
-            app/build/outputs/bundle/internalRelease/app-internal-release.aab
+          name: release-${{ github.sha }}  # Use the commit SHA as the artifact name
+          path: app/build/outputs/apk/internal/release/app-internal-release.apk
