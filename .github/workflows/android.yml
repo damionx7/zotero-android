@@ -7,7 +7,7 @@ on:
       - '**'  # Push events to every tag including hierarchical tags like v1.0/beta
 
 env:
-  ANDROID_PUBLISHER_CREDENTIALS: ${{secrets.ANDROID_PUBLISHER_CREDENTIALS}}
+  ANDROID_PUBLISHER_CREDENTIALS: ""
 
 jobs:
   build:
@@ -57,5 +57,13 @@ jobs:
       - name: Download Android dependencies
         run: ./gradlew androidDependencies --no-configuration-cache
 
-      - name: Deploy to Google Play Internal Test Track
-        run: ./gradlew --no-configuration-cache -PpreDexLibs=false publishInternalReleaseBundle --stacktrace
+      - name: Build Release APK/AAB
+        run: ./gradlew assembleRelease
+
+      - name: Upload Release APK/AAB as an Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-artifact
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/bundle/release/*.aab
