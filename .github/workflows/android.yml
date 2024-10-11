@@ -64,10 +64,10 @@ jobs:
       - name: List APK and AAB files
         run: ls -R app/build/outputs/
   
-      - name: Upload Release APK/AAB as an Artifact
+      - name: Upload Internal Release APK/AAB as an Artifact
         uses: actions/upload-artifact@v3
         with:
-          name: release-artifact
+          name: internal-release-artifact
           path: |
-            app/build/outputs/apk/release/app-release.apk
-            app/build/outputs/bundle/release/app-release.aab
+            app/build/outputs/apk/internal/release/app-internal-release.apk
+            app/build/outputs/bundle/internalRelease/app-internal-release.aab
