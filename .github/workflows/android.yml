@@ -61,5 +61,5 @@ jobs:
       - name: Upload Internal Release APK as an Artifact
         uses: actions/upload-artifact@v3
         with:
-          name: release-${{ github.sha }}  # Use the commit SHA as the artifact name
+          name: release.apk  # Use the commit SHA as the artifact name
           path: app/build/outputs/apk/internal/release/app-internal-release.apk
