@@ -5,6 +5,7 @@ on:
     # Pattern matched against refs/tags
     tags:
       - '**'  # Push events to every tag including hierarchical tags like v1.0/beta
+  workflow_dispatch:  # Allow manual triggering from GitHub Actions UI
 
 env:
   ANDROID_PUBLISHER_CREDENTIALS: ""
