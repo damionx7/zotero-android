@@ -1,4 +1,4 @@
-import com.github.triplet.gradle.androidpublisher.ResolutionStrategy
+//import com.github.triplet.gradle.androidpublisher.ResolutionStrategy
 import java.io.ByteArrayOutputStream
 
 plugins {
@@ -130,11 +130,11 @@ android {
     }
 }
 
-play {
-    track.set("internal")
-    defaultToAppBundles.set(true)
-    resolutionStrategy.set(ResolutionStrategy.AUTO)
-}
+//play {
+//    track.set("internal")
+//    defaultToAppBundles.set(true)
+//    resolutionStrategy.set(ResolutionStrategy.AUTO)
+//}
 
 dependencies {
 
