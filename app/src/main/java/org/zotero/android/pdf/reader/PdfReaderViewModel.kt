@@ -116,6 +116,7 @@ import org.zotero.android.pdf.annotation.data.PdfAnnotationArgs
 import org.zotero.android.pdf.annotation.data.PdfAnnotationColorResult
 import org.zotero.android.pdf.annotation.data.PdfAnnotationCommentResult
 import org.zotero.android.pdf.annotation.data.PdfAnnotationDeleteResult
+import org.zotero.android.pdf.annotation.data.PdfAnnotationFontSizeResult
 import org.zotero.android.pdf.annotation.data.PdfAnnotationSizeResult
 import org.zotero.android.pdf.annotationmore.data.PdfAnnotationMoreArgs
 import org.zotero.android.pdf.annotationmore.data.PdfAnnotationMoreDeleteResult
@@ -236,6 +237,9 @@ class PdfReaderViewModel @Inject constructor(
 
     private var disableForceScreenOnTimer: Timer? = null
 
+    private var annotationEditSelectedKey: String? = null
+    private var isLongPressOnTextAnnotation = false
+
     val screenArgs: PdfReaderArgs by lazy {
         val argsEncoded = stateHandle.get<String>(ARG_PDF_SCREEN).require()
         navigationParamsMarshaller.decodeObjectFromBase64(argsEncoded)
@@ -266,8 +270,8 @@ class PdfReaderViewModel @Inject constructor(
     @Subscribe(threadMode = ThreadMode.MAIN)
     fun onEvent(tagPickerResult: TagPickerResult) {
         if (tagPickerResult.callPoint == TagPickerResult.CallPoint.PdfReaderScreen) {
-            val annotation = this@PdfReaderViewModel.selectedAnnotation ?: return
-            set(tags = tagPickerResult.tags, key = annotation.key)
+            val key = this.annotationEditSelectedKey ?: return
+            set(tags = tagPickerResult.tags, key = key)
         }
     }
 
@@ -286,6 +290,11 @@ class PdfReaderViewModel @Inject constructor(
     @Subscribe(threadMode = ThreadMode.MAIN)
     fun onEvent(result: PdfAnnotationSizeResult) {
         setLineWidth(key = result.key, width = result.size)
+    }
+
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    fun onEvent(result: PdfAnnotationFontSizeResult) {
+        setF(key = result.key, fontSize = result.size)
     }
 
     @Subscribe(threadMode = ThreadMode.MAIN)
@@ -665,6 +674,14 @@ class PdfReaderViewModel @Inject constructor(
     }
 
     private fun setupInteractionListeners() {
+        pdfFragment.setOnDocumentLongPressListener { _, _, _, _, annotation ->
+            if (annotation?.type == AnnotationType.FREETEXT) {
+                isLongPressOnTextAnnotation = true
+                pdfFragment.setSelectedAnnotation(annotation)
+                return@setOnDocumentLongPressListener true
+            }
+            false
+        }
         pdfFragment.addOnAnnotationSelectedListener(object :
             AnnotationManager.OnAnnotationSelectedListener {
             override fun onPrepareAnnotationSelection(
@@ -680,7 +697,9 @@ class PdfReaderViewModel @Inject constructor(
                 val key = annotation.key ?: annotation.uuid
                 val type: Kind =
                     if (annotation.isZoteroAnnotation) Kind.database else Kind.document
-                selectAnnotationFromDocument(AnnotationKey(key = key, type = type))
+                selectAnnotationFromDocument(
+                    key = AnnotationKey(key = key, type = type),
+                )
             }
 
         })
@@ -1069,17 +1088,10 @@ class PdfReaderViewModel @Inject constructor(
             requests.add(request)
         }
 
-        if(requests.isEmpty()) { return }
-
-        viewModelScope.launch {
-            perform(
-                dbWrapper = dbWrapperMain,
-                writeRequests = requests
-            ).ifFailure {
-                Timber.e(it, "PDFReaderViewModel:  can't update changed annotations")
-                return@launch
-            }
+        if (requests.isEmpty()) {
+            return
         }
+        dbWrapperMain.realmDbStorage.perform(requests)
 
         pdfFragment.notifyAnnotationHasChanged(annotation)
         //TODO
@@ -1088,7 +1100,8 @@ class PdfReaderViewModel @Inject constructor(
     private fun processAnnotationObserving(
         annotation: Annotation,
         changes: List<String>,
-        pdfReaderNotification: PdfReaderNotification
+        pdfReaderNotification: PdfReaderNotification,
+        ignoreDebouncer: Boolean = false,
     ) {
 
         when (pdfReaderNotification) {
@@ -1110,13 +1123,18 @@ class PdfReaderViewModel @Inject constructor(
                         val key = annotation.key
                         if (key != null) {
 //                        if (changes.contains("rotation") || freeTextAnnotation.rotation != 0) {
-                            onAnnotationChangedDebouncerFlow.tryEmit(
-                                Triple(
-                                    Random.nextInt(),
-                                    adjustedAnnotations,
-                                    annotation
+
+                            if (ignoreDebouncer) {
+                                change(annotation = annotation, adjustedAnnotations)
+                            } else {
+                                onAnnotationChangedDebouncerFlow.tryEmit(
+                                    Triple(
+                                        Random.nextInt(),
+                                        adjustedAnnotations,
+                                        annotation
+                                    )
                                 )
-                            )
+                            }
 //                        } else {
 //                            val k = onAnnotationChangedDebouncerFlow.value
 //                            if (k != null) {
@@ -1596,10 +1614,12 @@ class PdfReaderViewModel @Inject constructor(
     private fun updateAnnotationsList(forceNotShowAnnotationPopup: Boolean = false) {
         hidePspdfkitToolbars()
         var showAnnotationPopup = !forceNotShowAnnotationPopup && !viewState.showSideBar && selectedAnnotation != null
-        if (selectedAnnotation?.type == org.zotero.android.database.objects.AnnotationType.text) {
+        if (selectedAnnotation?.type == org.zotero.android.database.objects.AnnotationType.text && !isLongPressOnTextAnnotation) {
             showAnnotationPopup = false
         }
+        isLongPressOnTextAnnotation = false
         if (showAnnotationPopup) {
+            annotationEditSelectedKey = selectedAnnotation?.key
             ScreenArguments.pdfAnnotationArgs = PdfAnnotationArgs(
                 selectedAnnotation = selectedAnnotation,
                 userId = viewState.userId,
@@ -1742,7 +1762,9 @@ class PdfReaderViewModel @Inject constructor(
         if (color != null && color.first != annotation.color) {
             changes.add(PdfAnnotationChanges.color)
         }
+        var ignoreDebouncer = true
         if (contents != null && contents != annotation.comment) {
+            ignoreDebouncer = false
             changes.add(PdfAnnotationChanges.contents)
         }
 
@@ -1765,6 +1787,9 @@ class PdfReaderViewModel @Inject constructor(
             if (blendMode != null) {
                 pdfAnnotation.blendMode = blendMode
             }
+            if (annotation.type == org.zotero.android.database.objects.AnnotationType.text) {
+                pdfFragment.notifyAnnotationHasChanged(pdfAnnotation)
+            }
         }
 
         if (changes.contains(PdfAnnotationChanges.contents) && contents != null) {
@@ -1779,9 +1804,10 @@ class PdfReaderViewModel @Inject constructor(
         }
 
         processAnnotationObserving(
-            pdfAnnotation,
-            PdfAnnotationChanges.stringValues(changes),
-            PdfReaderNotification.PSPDFAnnotationChanged
+            annotation = pdfAnnotation,
+            changes = PdfAnnotationChanges.stringValues(changes),
+            pdfReaderNotification = PdfReaderNotification.PSPDFAnnotationChanged,
+            ignoreDebouncer = ignoreDebouncer,
         )
     }
 
@@ -1930,6 +1956,9 @@ class PdfReaderViewModel @Inject constructor(
             if (contents.isNullOrBlank()) {
                 this.document.annotationProvider.removeAnnotationFromPage(annotation)
             }
+        }
+        updateState {
+            copy(selectedAnnotationKey = null)
         }
 
 //        if (viewState.selectedAnnotationKey?.key == annotation.key ) {
@@ -2236,10 +2265,7 @@ class PdfReaderViewModel @Inject constructor(
         if (newShowSideBarState && selectedAnnotationKey != null) {
             val index = viewState.sortedKeys.indexOf(selectedAnnotationKey)
             triggerEffect(
-                PdfReaderViewEffect.ShowPdfAnnotationAndUpdateAnnotationsList(
-                    index,
-                    false
-                )
+                PdfReaderViewEffect.ScrollSideBar(index)
             )
         }
     }
@@ -2966,7 +2992,7 @@ class PdfReaderViewModel @Inject constructor(
         val annotation =
             annotation(key)
                 ?: return
-        selectAnnotationFromDocument(key)
+        selectAnnotationFromDocument(key = key)
 
         updateState {
             copy(
@@ -2981,9 +3007,11 @@ class PdfReaderViewModel @Inject constructor(
 //            return
 //        }
         val annotationKey = AnnotationKey(key = annotation.key, type = Kind.database)
-        selectAnnotationFromDocument(annotationKey)
+        selectAnnotationFromDocument(key = annotationKey)
 
         val selected = annotation.tags.map { it.name }.toSet()
+
+        this.annotationEditSelectedKey = annotation.key
 
         ScreenArguments.tagPickerArgs = TagPickerArgs(
             libraryId = viewState.library.identifier,
@@ -3059,15 +3087,7 @@ class PdfReaderViewModel @Inject constructor(
             dateParser = this.dateParser
         )
 
-        viewModelScope.launch {
-            perform(
-                dbWrapper = dbWrapperMain,
-                request = request
-            ).ifFailure {
-                Timber.e(it, "PDFReaderViewModel:  can't update annotation $key")
-                return@launch
-            }
-        }
+        dbWrapperMain.realmDbStorage.perform(request)
     }
 
     private fun submitPendingPage(page: Int) {
@@ -3377,6 +3397,7 @@ sealed class PdfReaderViewEffect : ViewEffect {
     object ShowPdfAnnotationMore: PdfReaderViewEffect()
     object ShowPdfColorPicker: PdfReaderViewEffect()
     data class ShowPdfAnnotationAndUpdateAnnotationsList(val scrollToIndex: Int, val showAnnotationPopup: Boolean): PdfReaderViewEffect()
+    data class ScrollSideBar(val scrollToIndex: Int): PdfReaderViewEffect()
     object ScreenRefresh: PdfReaderViewEffect()
     object ClearFocus: PdfReaderViewEffect()
     object NavigateToTagPickerScreen: PdfReaderViewEffect()
