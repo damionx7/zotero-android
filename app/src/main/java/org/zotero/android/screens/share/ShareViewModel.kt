@@ -15,10 +15,12 @@ import kotlinx.coroutines.launch
 import org.greenrobot.eventbus.EventBus
 import org.greenrobot.eventbus.Subscribe
 import org.greenrobot.eventbus.ThreadMode
+import org.zotero.android.api.NonZoteroApi
 import org.zotero.android.api.mappers.CreatorResponseMapper
 import org.zotero.android.api.mappers.ItemResponseMapper
 import org.zotero.android.api.mappers.TagResponseMapper
 import org.zotero.android.api.network.CustomResult
+import org.zotero.android.api.network.safeApiCall
 import org.zotero.android.api.pojo.sync.ItemResponse
 import org.zotero.android.api.pojo.sync.KeyBaseKeyPair
 import org.zotero.android.api.pojo.sync.LibraryResponse
@@ -30,6 +32,7 @@ import org.zotero.android.architecture.ScreenArguments
 import org.zotero.android.architecture.ViewEffect
 import org.zotero.android.architecture.ViewState
 import org.zotero.android.architecture.coroutines.Dispatchers
+import org.zotero.android.architecture.logging.DeviceInfoProvider
 import org.zotero.android.database.DbWrapperMain
 import org.zotero.android.database.objects.Attachment
 import org.zotero.android.database.objects.FieldKeys
@@ -40,6 +43,8 @@ import org.zotero.android.database.requests.ReadRecentCollections
 import org.zotero.android.files.FileStore
 import org.zotero.android.helpers.GetUriDetailsUseCase
 import org.zotero.android.helpers.formatter.iso8601DateFormatV2
+import org.zotero.android.pdfworker.PdfWorkerController
+import org.zotero.android.screens.retrievemetadata.data.RetrieveMetadataState
 import org.zotero.android.screens.share.data.CollectionPickerState
 import org.zotero.android.screens.share.data.ItemPickerState
 import org.zotero.android.screens.share.data.ProcessedAttachment
@@ -96,6 +101,8 @@ internal class ShareViewModel @Inject constructor(
     private val shareFileDownloader: ShareFileDownloader,
     private val shareErrorProcessor: ShareErrorProcessor,
     private val shareItemSubmitter: ShareItemSubmitter,
+    private val pdfWorkerController: PdfWorkerController,
+    private val nonZoteroApi: NonZoteroApi,
 ) : BaseViewModel2<ShareViewState, ShareViewEffect>(ShareViewState()) {
 
     private val defaultLibraryId: LibraryIdentifier = LibraryIdentifier.custom(RCustomLibraryType.myLibrary)
@@ -108,6 +115,7 @@ internal class ShareViewModel @Inject constructor(
     private lateinit var selectedCollectionId: CollectionIdentifier
     private lateinit var selectedLibraryId: LibraryIdentifier
     private lateinit var attachmentKey: String
+    private var wasAttachmentUploaded: Boolean = false
 
     @Subscribe(threadMode = ThreadMode.MAIN)
     fun onEvent(tagPickerResult: TagPickerResult) {
@@ -137,8 +145,8 @@ internal class ShareViewModel @Inject constructor(
                     libraries = Libraries.all,
                     retryAttempt = 0
                 )
-                val attachment = shareRawAttachmentLoader.getLoadedAttachmentResult()
-                process(attachment)
+                var rawAttachmentType = calculateRawAttachmentType()
+                process(rawAttachmentType)
             } catch (e: Exception) {
                 Timber.e(e, "ShareViewModel: could not load attachment")
                 updateAttachmentState(
@@ -151,6 +159,42 @@ internal class ShareViewModel @Inject constructor(
                 )
             }
         }
+    }
+
+    private suspend fun calculateRawAttachmentType(): RawAttachment {
+        val rawAttachmentType = shareRawAttachmentLoader.getLoadedAttachmentResult()
+        //If it's a remoteUrl let's try to determine whether it's pointing to a webpage or a file.
+        if (rawAttachmentType is RawAttachment.remoteUrl) {
+            val networkResult = safeApiCall {
+                nonZoteroApi.sendHead(rawAttachmentType.url)
+            }
+            if (networkResult is CustomResult.GeneralSuccess.NetworkSuccess) {
+                val contentType = networkResult.headers["Content-Type"] ?: ""
+                if (contentType.contains(
+                        other = "application/",
+                        ignoreCase = true
+                    ) || contentType.contains(
+                        other = "image/",
+                        ignoreCase = true
+                    ) || contentType.contains(
+                        other = "video/",
+                        ignoreCase = true
+                    ) || contentType.contains(
+                        other = "audio/",
+                        ignoreCase = true
+                    )
+                ) {
+                    return RawAttachment.remoteFileUrl(
+                        url = rawAttachmentType.url,
+                        contentType = contentType,
+                        cookies = null,
+                        userAgent = DeviceInfoProvider.userAgentString,
+                        referrer = null,
+                    )
+                }
+            }
+        }
+        return rawAttachmentType
     }
 
     private fun setupObservers() {
@@ -384,7 +428,7 @@ internal class ShareViewModel @Inject constructor(
 
     private fun finishSync(successful: Boolean) {
         Timber.i("ShareViewModel: finishSync success = $successful")
-        if (!successful) {
+        if (!successful && wasAttachmentUploaded) {
             updateState {
                 copy(collectionPickerState = CollectionPickerState.failed)
             }
@@ -484,6 +528,7 @@ internal class ShareViewModel @Inject constructor(
     private suspend fun process(attachment: RawAttachment) {
         when (attachment) {
             is RawAttachment.web -> {
+                reportFileIsNotPdf()
                 processWeb(
                     title = attachment.title,
                     url = attachment.url,
@@ -495,6 +540,7 @@ internal class ShareViewModel @Inject constructor(
                 )
             }
             is RawAttachment.remoteUrl -> {
+                reportFileIsNotPdf()
                 process(url = attachment.url)
             }
             is RawAttachment.fileUrl -> {
@@ -558,6 +604,7 @@ internal class ShareViewModel @Inject constructor(
                             attachmentState = AttachmentState.processed
                         )
                     }
+                    attemptToRecognize(tmpFile = file, fileName = filename)
                 } else {
                     Timber.i("ShareViewModel: downloaded unsupported file")
                     updateState {
@@ -569,6 +616,7 @@ internal class ShareViewModel @Inject constructor(
                         )
                     }
                     file.delete()
+                    reportFileIsNotPdf()
                 }
             }
 
@@ -620,6 +668,7 @@ internal class ShareViewModel @Inject constructor(
                         attachmentState = AttachmentState.processed
                     )
                 }
+                attemptToRecognize(tmpFile = tmpFile, fileName = fileName)
             }
 
         } catch (e: Exception) {
@@ -710,6 +759,7 @@ internal class ShareViewModel @Inject constructor(
     override fun onCleared() {
         EventBus.getDefault().unregister(this)
         ioCoroutineScope.cancel()
+        pdfWorkerController.cancelAllLookups()
         super.onCleared()
     }
 
@@ -865,7 +915,6 @@ internal class ShareViewModel @Inject constructor(
                     upload(data = data)
                 }
             }
-
         } else if (viewState.url != null) {
             val url = viewState.url!!
             Timber.i("Submit webpage")
@@ -975,7 +1024,8 @@ internal class ShareViewModel @Inject constructor(
                 zipMimetype = this.zipMimetype,
                 processUploadToZoteroException = ::processUploadToZoteroException,
                 onBack = {
-                    triggerEffect(ShareViewEffect.NavigateBack)
+                    wasAttachmentUploaded = true
+                    maybeSaveCachedDataInPdfWorker()
                 })
         } else {
             shareItemSubmitter.uploadToZotero(
@@ -984,10 +1034,30 @@ internal class ShareViewModel @Inject constructor(
                 defaultMimetype = this.defaultMimetype,
                 processUploadToZoteroException = ::processUploadToZoteroException,
                 onBack = {
-                    triggerEffect(ShareViewEffect.NavigateBack)
+                    wasAttachmentUploaded = true
+                    maybeSaveCachedDataInPdfWorker()
                 }
             )
         }
+
+    }
+
+    private fun maybeSaveCachedDataInPdfWorker() {
+        if (viewState.retrieveMetadataState is RetrieveMetadataState.success) {
+            val tags = viewState.tags.map { TagResponse(tag = it.name, type = it.type) }
+            val collectionKeys = this.selectedCollectionId.keyGet?.let { setOf(it) } ?: emptySet()
+            pdfWorkerController.saveCachedData(
+                attachmentItemKey = this.attachmentKey,
+                libraryId = this.selectedLibraryId,
+                collectionKeys = collectionKeys,
+                tags = tags
+            )
+        } else {
+            if (wasAttachmentUploaded) {
+                triggerEffect(ShareViewEffect.NavigateBack)
+            }
+        }
+
 
     }
 
@@ -996,7 +1066,8 @@ internal class ShareViewModel @Inject constructor(
         error: CustomResult.GeneralError,
         data: UploadData
     ) {
-
+        wasAttachmentUploaded = false
+        maybeSaveCachedDataInPdfWorker()
         updateState {
             copy(
                 attachmentState = AttachmentState.failed(
@@ -1013,6 +1084,59 @@ internal class ShareViewModel @Inject constructor(
     fun errorMessage(error: AttachmentState.Error): String? {
         return shareErrorProcessor.errorMessage(error)
     }
+
+    private fun attemptToRecognize(tmpFile: File, fileName: String) {
+        if (!fileStore.isPdf(tmpFile)) {
+            reportFileIsNotPdf()
+            return
+        }
+
+        pdfWorkerController.observable.flow()
+            .onEach { result ->
+                observe(result)
+            }
+            .launchIn(viewModelScope)
+
+        pdfWorkerController.recognizeNewDocument(tmpFile = tmpFile, pdfFileName = fileName)
+    }
+
+    private fun reportFileIsNotPdf() {
+        viewModelScope.launch {
+            updateState {
+                copy(retrieveMetadataState = RetrieveMetadataState.fileIsNotPdf)
+            }
+        }
+    }
+
+    private fun observe(update: PdfWorkerController.Update) {
+        when(update) {
+            is PdfWorkerController.Update.recognizeInit -> {
+                //no-op
+            }
+            PdfWorkerController.Update.recognizedDataIsEmpty -> {
+                updateState {
+                    copy(retrieveMetadataState = RetrieveMetadataState.recognizedDataIsEmpty)
+                }
+            }
+            is PdfWorkerController.Update.recognizeError -> {
+                updateState { copy(retrieveMetadataState = RetrieveMetadataState.failed(update.errorMessage)) }
+            }
+            is PdfWorkerController.Update.recognizedAndSaved -> {
+                if (wasAttachmentUploaded) {
+                    triggerEffect(ShareViewEffect.NavigateBack)
+                }
+            }
+            is PdfWorkerController.Update.recognizedAndKeptInMemory -> {
+                updateState {
+                    copy(retrieveMetadataState = RetrieveMetadataState.success(
+                        recognizedTitle = update.recognizedTitle,
+                        recognizedTypeIcon = update.recognizedTypeIcon
+                    ))
+                }
+            }
+        }
+    }
+
 }
 
 internal data class ShareViewState(
@@ -1027,6 +1151,7 @@ internal data class ShareViewState(
     val itemPickerState: ItemPickerState? = null,
     val tags: List<Tag> = emptyList(),
     val isSubmitting: Boolean = false,
+    val retrieveMetadataState: RetrieveMetadataState = RetrieveMetadataState.loading,
 ) : ViewState
 
 internal sealed class ShareViewEffect : ViewEffect {

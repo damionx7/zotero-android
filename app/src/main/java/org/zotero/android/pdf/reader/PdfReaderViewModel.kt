@@ -821,7 +821,17 @@ class PdfReaderViewModel @Inject constructor(
             is CustomResult.GeneralSuccess -> {
                 this.liveAnnotations?.removeAllChangeListeners()
                 this.liveAnnotations = dbResult.value!!.first
-                val storedPage = dbResult.value!!.second
+                var storedPage = dbResult.value!!.second
+                //We have cases where presumably -1 was saved to DB as storedPage against some PDF documents causing a crash on PDF document open.
+                //Assumption is that PSPDFKIT's pageIndex method returned -1 for when it didn't have it's 'document' completely initialized when user returned to the app after a long time and immediately backed from PdfScreen
+                //-1 should no longer be saved as storedPage as 00950b1 commit should cover for it, by ensuring 'document' is not null
+                //But we still need to clean Database entries with -1 storedPage
+                if (storedPage == -1) {
+                    Timber.w("storedPage was found to be -1")
+                    storedPage = 0
+                    submitPendingPage(0)
+                }
+
                 observe(liveAnnotations!!)
                 this.databaseAnnotations = liveAnnotations!!.freeze()
                 val documentAnnotations = loadAnnotations(
@@ -845,12 +855,28 @@ class PdfReaderViewModel @Inject constructor(
 
                 update(
                     document = this.document,
-                    zoteroAnnotations = dbToPdfAnnotations,
+                    zoteroAnnotations = dbToPdfAnnotations.map { it.third },
                     key = key,
                     libraryId = library.identifier,
                     isDark = viewState.isDark
                 )
-                for (annotation in dbToPdfAnnotations) {
+
+                val cleanedDbToPdfAnnotations = dbToPdfAnnotations.mapNotNull { triple ->
+                    val libraryId = triple.first
+                    val rItemKey = triple.second
+                    val annotation = triple.third
+                    if (wasAnnotationsWithZeroSizeRemoved(
+                            libraryId = libraryId,
+                            rItemKey = rItemKey,
+                            annotation = annotation
+                        )
+                    ) {
+                        return@mapNotNull null
+                    }
+                    annotation
+                }
+
+                for (annotation in cleanedDbToPdfAnnotations) {
                     annotationPreviewManager.store(
                         rawDocument = this.rawDocument,
                         annotation = annotation,
@@ -916,6 +942,14 @@ class PdfReaderViewModel @Inject constructor(
         onAnnotationUpdatedListener = object :
             AnnotationProvider.OnAnnotationUpdatedListener {
             override fun onAnnotationCreated(annotation: Annotation) {
+                if (isAnnotationZeroSize(annotation)) {
+                    Timber.w("PdfReaderViewModel: Prevented an annotation of type ${annotation.type} from being created due to zero dimensions")
+                    this@PdfReaderViewModel.document.annotationProvider.removeAnnotationFromPage(
+                        annotation
+                    )
+                    return
+                }
+
                 processAnnotationObserving(annotation, emptyList(), PdfReaderNotification.PSPDFAnnotationsAdded)
             }
 
@@ -941,6 +975,42 @@ class PdfReaderViewModel @Inject constructor(
             }
         }
         pdfFragment.addOnAnnotationUpdatedListener(onAnnotationUpdatedListener!!)
+    }
+
+    private fun wasAnnotationsWithZeroSizeRemoved(
+        libraryId: LibraryIdentifier,
+        rItemKey: String,
+        annotation: Annotation
+    ): Boolean {
+        if (isAnnotationZeroSize(annotation)) {
+            this@PdfReaderViewModel.document.annotationProvider.removeAnnotationFromPage(
+                annotation
+            )
+            dbWrapperMain.realmDbStorage.perform(
+                MarkObjectsAsDeletedDbRequest(
+                    clazz = RItem::class,
+                    keys = listOf(rItemKey),
+                    libraryId = libraryId
+                )
+            )
+            return true
+        }
+        return false
+    }
+
+    private fun isAnnotationZeroSize(annotation: Annotation): Boolean {
+        val annotationRect = annotation.boundingBox
+        val width = (annotationRect.right - annotationRect.left).toInt()
+        val height = (annotationRect.top - annotationRect.bottom).toInt()
+        if (listOf(
+                AnnotationType.SQUARE,
+                AnnotationType.INK
+            ).contains(annotation.type) && (width == 0 || height == 0)
+        ) {
+            Timber.w("PdfReaderViewModel: Found an annotation of type ${annotation.type} having zero dimensions width=$width and height=$height")
+            return true
+        }
+        return false
     }
 
     private fun change(annotation: Annotation, changes: List<String>) {
@@ -1997,7 +2067,11 @@ class PdfReaderViewModel @Inject constructor(
         fragmentManager.commit(allowStateLoss = true) {
             remove(this@PdfReaderViewModel.pdfUiFragment)
         }
-        pdfFragment.removeOnAnnotationUpdatedListener(onAnnotationUpdatedListener!!)
+        if (this::pdfFragment.isInitialized) {
+            onAnnotationUpdatedListener?.let {
+                pdfFragment.removeOnAnnotationUpdatedListener(it)
+            }
+        }
 
         EventBus.getDefault().unregister(this)
         liveAnnotations?.removeAllChangeListeners()
@@ -2012,16 +2086,18 @@ class PdfReaderViewModel @Inject constructor(
         annotationPreviewManager.cancelProcessing()
         annotationPreviewFileCache.cancelProcessing()
         clearThumbnailCaches()
-        document.annotationProvider
-            .getAllAnnotationsOfTypeAsync(AnnotationsConfig.supported)
-            .toList()
-            .blockingGet()
-            .forEach {
-                this.document.annotationProvider.removeAnnotationFromPage(it)
-            }
-        val activity = pdfUiFragment.activity
-        if (activity != null) {
-            WindowCompat.getInsetsController(activity.window, activity.window.decorView).show(
+        if (this::document.isInitialized) {
+            document.annotationProvider
+                .getAllAnnotationsOfTypeAsync(AnnotationsConfig.supported)
+                .toList()
+                .blockingGet()
+                .forEach {
+                    this.document.annotationProvider.removeAnnotationFromPage(it)
+                }
+        }
+
+        pdfUiFragment.activity?.let {
+            WindowCompat.getInsetsController(it.window, it.window.decorView).show(
                 WindowInsetsCompat.Type.systemBars()
             )
         }
@@ -2343,6 +2419,7 @@ class PdfReaderViewModel @Inject constructor(
     }
 
     fun onStop(isChangingConfigurations: Boolean) {
+        disableForceScreenOnTimer?.cancel()
         if (!this::pdfFragment.isInitialized || this.pdfFragment.document == null) {
             //If pdfFragment is not yet initialized and onStop is called the most likely cause is that user has returned to the app after a while hence ViewModel was deinitialized and then user either very quickly:
             //1. Navigated to some other screen from PdfReaderScreen screen

@@ -19,18 +19,22 @@ import org.zotero.android.screens.webview.ZoteroWebViewScreen
 import java.io.File
 
 internal const val ARG_ITEM_DETAILS_SCREEN = "itemDetailsArgs"
+internal const val ARG_RETRIEVE_METADATA = "retrieveMetadataArgs"
+internal const val ARG_TAGS_FILTER = "tagsScreen"
+internal const val ARG_ADD_OR_EDIT_NOTE = "notesScreen"
 
 fun NavGraphBuilder.allItemsScreen(
     navigateToCollectionsScreen: () -> Unit,
     navigateToItemDetails: (String) -> Unit,
-    navigateToAddOrEditNote: () -> Unit,
+    navigateToAddOrEditNote: (String) -> Unit,
     navigateToSinglePicker: () -> Unit,
     navigateToAllItemsSort: () -> Unit,
     navigateToAddByIdentifier: (addByIdentifierParams: String) -> Unit,
+    navigateToRetrieveMetadata: (params: String) -> Unit,
     navigateToVideoPlayerScreen: () -> Unit,
     navigateToImageViewerScreen: () -> Unit,
     navigateToZoterWebViewScreen: (String) -> Unit,
-    navigateToTagFilter: () -> Unit,
+    navigateToTagFilter: (params: String) -> Unit,
     navigateToCollectionPicker: () -> Unit,
     navigateToScanBarcode: () -> Unit,
     onOpenFile: (file: File, mimeType: String) -> Unit,
@@ -59,6 +63,7 @@ fun NavGraphBuilder.allItemsScreen(
             navigateToTagFilter = navigateToTagFilter,
             navigateToCollectionPicker = navigateToCollectionPicker,
             navigateToScanBarcode = navigateToScanBarcode,
+            navigateToRetrieveMetadata = navigateToRetrieveMetadata,
         )
     }
 }
@@ -68,7 +73,7 @@ fun NavGraphBuilder.itemDetailsScreen(
     navigateToCreatorEdit: () -> Unit,
     navigateToTagPicker: () -> Unit,
     navigateToSinglePicker: () -> Unit,
-    navigateToAddOrEditNote: () -> Unit,
+    navigateToAddOrEditNote: (String) -> Unit,
     navigateToVideoPlayerScreen: () -> Unit,
     navigateToImageViewerScreen: () -> Unit,
     navigateToZoterWebViewScreen: (String) -> Unit,
@@ -106,8 +111,10 @@ fun NavGraphBuilder.addNoteScreen(
     navigateToTagPicker: () -> Unit,
 ) {
     composable(
-        route = CommonScreenDestinations.ADD_NOTE,
-        arguments = listOf(),
+        route = "${CommonScreenDestinations.ADD_NOTE}/{$ARG_ADD_OR_EDIT_NOTE}",
+        arguments = listOf(
+            navArgument(ARG_ADD_OR_EDIT_NOTE) { type = NavType.StringType },
+        ),
     ) {
         AddNoteScreen(
             onBack = onBack,
@@ -209,8 +216,8 @@ fun ZoteroNavigation.toItemDetails(args: String) {
     navController.navigate("${CommonScreenDestinations.ITEM_DETAILS}/$args")
 }
 
-fun ZoteroNavigation.toAddOrEditNote() {
-    navController.navigate(CommonScreenDestinations.ADD_NOTE)
+fun ZoteroNavigation.toAddOrEditNote(args: String) {
+    navController.navigate("${CommonScreenDestinations.ADD_NOTE}/$args")
 }
 
 fun ZoteroNavigation.toVideoPlayerScreen() {
